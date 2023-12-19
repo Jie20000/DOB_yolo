@@ -9,7 +9,7 @@ class SiLU(nn.Module):
 
 def autopad(k, p=None):
     if p is None:
-        p = k // 2 if isinstance(k, int) else [x // 2 for x in k] 
+        p = k // 2 if isinstance(k, int) else [x // 2 for x in k]
     return p
 
 class Focus(nn.Module):
@@ -23,9 +23,9 @@ class Focus(nn.Module):
             # 640, 640, 3 => 320, 320, 12
             torch.cat(
                 [
-                    x[..., ::2, ::2], 
-                    x[..., 1::2, ::2], 
-                    x[..., ::2, 1::2], 
+                    x[..., ::2, ::2],
+                    x[..., 1::2, ::2],
+                    x[..., ::2, 1::2],
                     x[..., 1::2, 1::2]
                 ], 1
             )
@@ -45,7 +45,7 @@ class Conv(nn.Module):
         return self.act(self.conv(x))
 
 class Bottleneck(nn.Module):
-    # Standard bottleneck
+
     def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, shortcut, groups, expansion
         super(Bottleneck, self).__init__()
         c_ = int(c2 * e)  # hidden channels
@@ -57,7 +57,7 @@ class Bottleneck(nn.Module):
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
 class C3(nn.Module):
-    # CSP Bottleneck with 3 convolutions
+
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super(C3, self).__init__()
         c_ = int(c2 * e)  # hidden channels
@@ -70,13 +70,13 @@ class C3(nn.Module):
     def forward(self, x):
         return self.cv3(torch.cat(
             (
-                self.m(self.cv1(x)), 
+                self.m(self.cv1(x)),
                 self.cv2(x)
             )
             , dim=1))
 
 class SPP(nn.Module):
-    # Spatial pyramid pooling layer used in YOLOv3-SPP
+
     def __init__(self, c1, c2, k=(5, 9, 13)):
         super(SPP, self).__init__()
         c_ = c1 // 2  # hidden channels
@@ -87,63 +87,146 @@ class SPP(nn.Module):
     def forward(self, x):
         x = self.cv1(x)
         return self.cv2(torch.cat([x] + [m(x) for m in self.m], 1))
-        
-class CSPDarknet(nn.Module):
+class h_sigmoid(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_sigmoid, self).__init__()
+        self.relu = nn.ReLU6(inplace=inplace)
+
+    def forward(self, x):
+        return self.relu(x + 3) / 6
+
+
+class h_swish(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_swish, self).__init__()
+        self.sigmoid = h_sigmoid(inplace=inplace)
+
+    def forward(self, x):
+        return x * self.sigmoid(x)
+
+
+class SELayer(nn.Module):
+    def __init__(self, channel, reduction=4):
+        super(SELayer, self).__init__()
+        # Squeeze
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # Excitation(FC+ReLU+FC+Sigmoid)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel),
+            h_sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x)
+        y = y.view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+
+
+class conv_bn_hswish(nn.Module):
+    """
+    This equals to
+    def conv_3x3_bn(inp, oup, stride):
+        return nn.Sequential(
+            nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
+            nn.BatchNorm2d(oup),
+            h_swish()
+        )
+    """
+
+    def __init__(self, c1, c2, stride):
+        super(conv_bn_hswish, self).__init__()
+        self.conv = nn.Conv2d(c1, c2, 3, stride, 1, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = h_swish()
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+    def fuseforward(self, x):
+        return self.act(self.conv(x))
+
+
+class MobileNet_Block(nn.Module):
+    def __init__(self, inp, oup, hidden_dim, kernel_size, stride, use_se, use_hs):
+        super(MobileNet_Block, self).__init__()
+        assert stride in [1, 2]
+
+        self.identity = stride == 1 and inp == oup
+
+        if inp == hidden_dim:
+            self.conv = nn.Sequential(
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, (kernel_size - 1) // 2, groups=hidden_dim,
+                          bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                h_swish() if use_hs else nn.ReLU(inplace=True),
+                # Squeeze-and-Excite
+                SELayer(hidden_dim) if use_se else nn.Sequential(),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+            )
+        else:
+
+            self.conv = nn.Sequential(
+                # pw
+                nn.Conv2d(inp, hidden_dim, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                h_swish() if use_hs else nn.ReLU(inplace=True),
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, (kernel_size - 1) // 2, groups=hidden_dim,
+                          bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                # Squeeze-and-Excite
+                SELayer(hidden_dim) if use_se else nn.Sequential(),
+                h_swish() if use_hs else nn.ReLU(inplace=True),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+            )
+
+    def forward(self, x):
+        y = self.conv(x)
+        if self.identity:
+            return x + y
+        else:
+            return y
+class CSPDarknet_MobileNet(nn.Module):
     def __init__(self, base_channels, base_depth, phi, pretrained):
         super().__init__()
         #-----------------------------------------------#
-        #   输入图片是640, 640, 3
-        #   初始的基本通道base_channels是64
-        #-----------------------------------------------#
-
-        #-----------------------------------------------#
-        #   利用focus网络结构进行特征提取
-        #   640, 640, 3 -> 320, 320, 12 -> 320, 320, 64
-        #-----------------------------------------------#
-        self.stem       = Focus(3, base_channels, k=3)
-        
-        #-----------------------------------------------#
-        #   完成卷积之后，320, 320, 64 -> 160, 160, 128
-        #   完成CSPlayer之后，160, 160, 128 -> 160, 160, 128
+        self.stem = conv_bn_hswish(2, base_channels, stride=1)
         #-----------------------------------------------#
         self.dark2 = nn.Sequential(
-            # 320, 320, 64 -> 160, 160, 128
-            Conv(base_channels, base_channels * 2, 3, 2),
-            # 160, 160, 128 -> 160, 160, 128
-            C3(base_channels * 2, base_channels * 2, base_depth),
+            MobileNet_Block(16, 16, hidden_dim=16, kernel_size=3, stride=2, use_se=True, use_hs=False),
+            MobileNet_Block(24, 24, hidden_dim=72, kernel_size=3, stride=2, use_se=False, use_hs=False)
         )
-        
-        #-----------------------------------------------#
-        #   完成卷积之后，160, 160, 128 -> 80, 80, 256
-        #   完成CSPlayer之后，80, 80, 256 -> 80, 80, 256
-        #                   在这里引出有效特征层80, 80, 256
-        #                   进行加强特征提取网络FPN的构建
+
+
         #-----------------------------------------------#
         self.dark3 = nn.Sequential(
-            Conv(base_channels * 2, base_channels * 4, 3, 2),
-            C3(base_channels * 4, base_channels * 4, base_depth * 3),
+            MobileNet_Block(24, 24, hidden_dim=88, kernel_size=3, stride=1, use_se=False, use_hs=False),
+            MobileNet_Block(40, 40, hidden_dim=96, kernel_size=5, stride=2, use_se=True, use_hs=True)
         )
 
         #-----------------------------------------------#
-        #   完成卷积之后，80, 80, 256 -> 40, 40, 512
-        #   完成CSPlayer之后，40, 40, 512 -> 40, 40, 512
-        #                   在这里引出有效特征层40, 40, 512
-        #                   进行加强特征提取网络FPN的构建
-        #-----------------------------------------------#
         self.dark4 = nn.Sequential(
-            Conv(base_channels * 4, base_channels * 8, 3, 2),
-            C3(base_channels * 8, base_channels * 8, base_depth * 3),
+            MobileNet_Block(40, 40, hidden_dim=240, kernel_size=5, stride=1, use_se=True, use_hs=True),
+            MobileNet_Block(40, 40, hidden_dim=240, kernel_size=5, stride=1, use_se=True, use_hs=True)
         )
-        
-        #-----------------------------------------------#
-        #   完成卷积之后，40, 40, 512 -> 20, 20, 1024
-        #   完成SPP之后，20, 20, 1024 -> 20, 20, 1024
-        #   完成CSPlayer之后，20, 20, 1024 -> 20, 20, 1024
+
+
         #-----------------------------------------------#
         self.dark5 = nn.Sequential(
-            Conv(base_channels * 8, base_channels * 16, 3, 2),
-            SPP(base_channels * 16, base_channels * 16),
-            C3(base_channels * 16, base_channels * 16, base_depth, shortcut=False),
+            MobileNet_Block(48, 48, hidden_dim=120, kernel_size=5, stride=1, use_se=True, use_hs=True),
+            MobileNet_Block(48, 48, hidden_dim=144, kernel_size=5, stride=1, use_se=True, use_hs=True),
+            MobileNet_Block(96, 96, hidden_dim=288, kernel_size=5, stride=1, use_se=True, use_hs=True),
+            MobileNet_Block(96, 96, hidden_dim=576, kernel_size=5, stride=1, use_se=True, use_hs=True),
+            MobileNet_Block(96, 96, hidden_dim=576, kernel_size=5, stride=1, use_se=True, use_hs=True)
         )
         if pretrained:
             url = {
@@ -155,23 +238,18 @@ class CSPDarknet(nn.Module):
             checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", model_dir="./model_data")
             self.load_state_dict(checkpoint, strict=False)
             print("Load weights from ", url.split('/')[-1])
-            
+
     def forward(self, x):
         x = self.stem(x)
         x = self.dark2(x)
-        #-----------------------------------------------#
-        #   dark3的输出为80, 80, 256，是一个有效特征层
-        #-----------------------------------------------#
+
         x = self.dark3(x)
         feat1 = x
-        #-----------------------------------------------#
-        #   dark4的输出为40, 40, 512，是一个有效特征层
-        #-----------------------------------------------#
+
+
         x = self.dark4(x)
         feat2 = x
-        #-----------------------------------------------#
-        #   dark5的输出为20, 20, 1024，是一个有效特征层
-        #-----------------------------------------------#
+
         x = self.dark5(x)
         feat3 = x
         return feat1, feat2, feat3

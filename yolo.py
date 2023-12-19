@@ -54,8 +54,8 @@ cv2.namedWindow(WIN_NAME, cv2.WINDOW_AUTOSIZE)
 
 class YOLO(object):
     _defaults = {
-        "model_path"        : 'logs/best_weights.pth',
-        "classes_path"      : 'model_data/ship.txt',
+        "model_path"        : 'model_data/yolov5_s_v6.1.pth',
+        "classes_path"      : 'model_data/coco_classes.txt',
         "anchors_path": 'model_data/yolo_anchors.txt',
         "anchors_mask": [[6, 7, 8], [3, 4, 5], [0, 1, 2]],
         "input_shape": [640, 640],

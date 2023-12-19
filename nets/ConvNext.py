@@ -55,10 +55,7 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
             return tensor
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
-#--------------------------------------#
-#   Gelu激活函数的实现
-#   利用近似的数学公式
-#--------------------------------------#
+
 class GELU(nn.Module):
     def __init__(self):
         super(GELU, self).__init__()
@@ -67,9 +64,7 @@ class GELU(nn.Module):
         return 0.5 * x * (1 + torch.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * torch.pow(x,3))))
     
 #---------------------------------------------------------------------------------#
-#   LayerNorm 支持两种形式channels_last (default) or channels_first. 
-#   channels_last   对应具有形状的输入(batch_size, height, width, channels) 
-#   channels_first  对应具有形状的输入(batch_size, channels, height, width).   
+
 #---------------------------------------------------------------------------------#
 class LayerNorm(nn.Module):
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
@@ -93,62 +88,51 @@ class LayerNorm(nn.Module):
             return x
 
 #--------------------------------------------------------------------------------------------------------------#
-#   ConvNeXt Block有两种等效的实现:
-#   (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
-#   (2) DwConv -> Permute to (N, H, W, C); LayerNorm (channels_last) -> Linear -> GELU -> Linear; Permute back
-#   代码中使用（2），因为这个在PyTorch中稍微快一点
+
 #--------------------------------------------------------------------------------------------------------------#
 class Block(nn.Module):
     def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6):
         super().__init__()
         #--------------------------#
-        #   7x7的逐层卷积
+
         #--------------------------#
         self.dwconv     = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
         self.norm       = LayerNorm(dim, eps=1e-6)
         #--------------------------#
-        #   利用全连接层代替1x1卷积
+
         #--------------------------#
         self.pwconv1    = nn.Linear(dim, 4 * dim)
         self.act        = GELU()
         #--------------------------#
-        #   利用全连接层代替1x1卷积
+
         #--------------------------#
         self.pwconv2    = nn.Linear(4 * dim, dim)
         #--------------------------#
-        #   加入缩放系数
+
         #--------------------------#
         self.gamma      = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True) if layer_scale_init_value > 0 else None
         #--------------------------#
-        #   加入Drop_path正则化
+
         #--------------------------#
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
         input = x
         #--------------------------#
-        #   7x7的逐层卷积
-        #--------------------------#
         x = self.dwconv(x)
         x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
         x = self.norm(x)
         #--------------------------#
-        #   利用全连接层代替1x1卷积
-        #--------------------------#
         x = self.pwconv1(x)
         x = self.act(x)
         #--------------------------#
-        #   利用全连接层代替1x1卷积
-        #--------------------------#
         x = self.pwconv2(x)
         #--------------------------#
-        #   加入缩放系数
-        #--------------------------#
+
         if self.gamma is not None:
             x = self.gamma * x
         x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
-        #--------------------------#
-        #   加入Drop_path正则化
+
         #--------------------------#
         x = input + self.drop_path(x)
         return x
@@ -176,8 +160,6 @@ class ConvNeXt(nn.Module):
         self.downsample_layers.append(stem)
         
         #--------------------------------------------------#
-        #   定义三次下采样的过程
-        #   利用步长为2x2，卷积核大小为2x2的卷积进行下采样
         #--------------------------------------------------#
         for i in range(3):
             downsample_layer = nn.Sequential(
@@ -187,14 +169,12 @@ class ConvNeXt(nn.Module):
             self.downsample_layers.append(downsample_layer)
 
         #--------------------------------------------------#
-        #   根据深度的不同，定义不同的drop率
+
         #--------------------------------------------------#
         self.stages = nn.ModuleList()
         dp_rates    = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))] 
         cur         = 0
         #--------------------------------------------------#
-        #   整个ConvNeXt除了Stem外，存在四个Stage
-        #   每个Stage里面是多个ConvNeXt Block的堆叠。
         #--------------------------------------------------#
         for i in range(4):
             stage = nn.Sequential(
@@ -225,7 +205,6 @@ model_urls = {
 }
 
 #------------------------------------------------------#
-#   Tiny约等于Cspdarknet-L的尺寸
 #------------------------------------------------------#
 def ConvNeXt_Tiny(pretrained=False, **kwargs):
     model = ConvNeXt(depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], **kwargs)
@@ -237,7 +216,6 @@ def ConvNeXt_Tiny(pretrained=False, **kwargs):
     return model
 
 #------------------------------------------------------#
-#   Tiny约等于Cspdarknet-X的尺寸
 #------------------------------------------------------#
 def ConvNeXt_Small(pretrained=False, **kwargs):
     model = ConvNeXt(depths=[3, 3, 27, 3], dims=[96, 192, 384, 768], **kwargs)

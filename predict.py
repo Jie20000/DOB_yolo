@@ -7,7 +7,8 @@ if __name__ == "__main__":
     mode = "video"
     crop            = False
     count           = False
-    video_path      ="new_ship2.avi"
+    video_path      ="new_car.avi"
+    video_fps       = 25.0
     video_save_path = ""
     test_interval   = 100
     fps_image_path  = "img/street.jpg"
